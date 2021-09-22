@@ -11,10 +11,10 @@ import numpy as np
 import itertools
 from dataclasses import dataclass, field
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 
-class ProbeSoufflé(arbor.recipe):
+class Fumigation(arbor.recipe):
     """
     Probe all the things.
     """
@@ -56,7 +56,7 @@ class ProbeSoufflé(arbor.recipe):
 
 
 @dataclass
-class Ingredient:
+class Patient:
     """
     All information on a single cell model
     """
@@ -137,7 +137,7 @@ class DecorSpy(arbor.decor):
         self.placed.append((args, kwargs))
 
 
-def bake(recipe, duration=1000):
+def apply(recipe, duration=1000):
     context = arbor.context()
     domains = arbor.partition_load_balance(recipe, context)
     sim = arbor.simulation(recipe, domains, context)
