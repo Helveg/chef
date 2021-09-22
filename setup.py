@@ -4,21 +4,21 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 # Get the version from the patch module without importing it.
-with open(os.path.join(os.path.dirname(__file__), "chef", "__init__.py"), "r") as f:
+with open(os.path.join(os.path.dirname(__file__), "pesticide", "__init__.py"), "r") as f:
     for line in f:
         if "__version__ = " in line:
             exec(line.strip())
             break
 
 setuptools.setup(
-    name="chef",
+    name="pesticide",
     version=__version__,
     author="Robin De Schepper",
     author_email="robingilbert.deschepper@unipv.it",
-    description="Makes Arbor recipes",
+    description="Inspect your models and get rid of bugs in your Arboretum.",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/helveg/patch",
+    url="https://github.com/helveg/pesticide",
     license="MIT",
     packages=setuptools.find_packages(),
     classifiers=[
