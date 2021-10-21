@@ -29,5 +29,9 @@ setuptools.setup(
     ],
     python_requires=">=3.8",
     install_requires=["plotly", "arborize>=2.0.1"],
-    extras_require={"dev": ["sphinx", "pre-commit", "black>=20.8b1", "sphinxcontrib-contentui"]},
+    extras_require={
+        "dev": ["sphinx", "pre-commit", "black>=20.8b1", "sphinxcontrib-contentui"],
+        "neuron": ["NEURON", "nrn-subprocess"],
+        "mpi": ["mpi4py", "mpipool"],
+    },
 )

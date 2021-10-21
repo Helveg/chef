@@ -1,45 +1,149 @@
 import arbor
-from arbor import (
-    cable_cell as arb_cable_cell,
-    catalogue as arb_catalogue,
-    decor as arb_decor,
-    morphology as arb_morphology,
-    label_dict as arb_label_dict,
-    place_pwlin as arb_place_pwlin,
-)
 import numpy as np
 import itertools
+import functools
+import types
+import sys
 from dataclasses import dataclass, field
+import nrnsub
+from time import time
+from .trees import Tree
 
 __version__ = "0.0.2"
 
+try:
+    import neuron
+    def _nrn_available(default=lambda: None):
+        def decorator(f):
+            @functools.wraps(f)
+            def w(*args, **kwargs):
+                return f(*args, **kwargs)
 
-class Fumigation(arbor.recipe):
+            return w
+
+        return decorator
+
+    neuron.available = _nrn_available
+    neuron.is_available = True
+except ImportError:
+    def _nrn_unavailable(default=lambda: None):
+        def decorator(f):
+            @functools.wraps(f)
+            def w(*args, **kwargs):
+                return default()
+
+            return w
+
+        return decorator
+
+    sys.modules["neuron"] = neuron = types.ModuleType("neuron")
+    neuron.available = _nrn_unavailable
+    neuron.is_available = False
+
+
+class SafetyLabel:
+    def __init__(self, neuron_base=True, v_init=-65, K=302.15, rL=35.4, cm=0.01, **kwargs):
+        if neuron_base:
+            self._props = arbor.neuron_cable_properties()
+        else:
+            self._props = arbor.cable_global_properties()
+        # self._props.set_property(Vm=v_init, tempK=K, rL=35.4, cm=0.01)
+        grouped_by_ion = {}
+        for k, v in kwargs.items():
+            parts = k.split("_")
+            ion = parts[0]
+            prop = "_".join(parts[1:])
+            ion_props = grouped_by_ion.setdefault(ion, dict())
+            ion_props[prop] = v
+        for ion, props in grouped_by_ion.items():
+            self._props.set_ion(ion=ion, **props)
+
+    @property
+    def properties(self):
+        return self._props
+
+def default_props():
+    return SafetyLabel(
+        na_int_con=10.0, na_ext_con=140.0, na_rev_pot=50.0,
+        k_int_con=54.4, k_ext_con=2.5, k_rev_pot=-77.0,
+        ca_int_con=0.00005, ca_ext_con=2.0, ca_rev_pot=132.5,
+        cal_int_con=0.00005, cal_ext_con=2.0, cal_rev_pot=132.5, cal_valence=2,
+        h_valence=1.0, h_int_con=1.0, h_ext_con=1.0, h_rev_pot=-34.0,
+    )
+
+
+class Treatment:
+    """
+    Treatments contain all information on a simulation.
+    """
+    t = 10
+    dt = 0.025
+
+
+class Nursery(arbor.recipe, Treatment):
+    """
+    Nurse a tree. Ok, runs a single cell model :rolls_eyes:
+    """
+    def __init__(self, trees, cat=None, props=None):
+        super().__init__()
+        if len(trees) != 1:
+            raise Exception(f"Nursery is a single tree treatment. {len(trees)} given.")
+        self._trees = trees
+        self._tree = trees[0]
+        if props is None:
+            props = default_props()
+        if cat is None:
+            cat = self._tree.catalogue
+        self._props = props
+        self._catalogue = cat
+        self._props.properties.register(cat)
+
+    def num_cells(self):
+        return 1
+
+    def probes(self, gid):
+        return []
+        [
+            arbor.cable_probe_membrane_voltage(rm)
+            for rm in tree.get_region_midpoints()
+        ]
+
+    def num_sources(self, gid):
+        return 0
+
+    def cell_kind(self, gid):
+        return arbor.cell_kind.cable
+
+    def cell_description(self, gid):
+        return self._tree.arbor_cell
+
+    def global_properties(self, kind):
+        return self._props.properties
+
+
+class Fumigation(arbor.recipe, Treatment):
     """
     Probe all the things.
     """
-    def __init__(self, ingredients, v_init=-65, K=302.15):
+    def __init__(self, trees, props=None):
         super().__init__()
-        self._ingredients = ingredients
-        self._props = arbor.neuron_cable_properties()
-        self._props.set_property(Vm=v_init, tempK=K, rL=35.4, cm=0.01)
-        self._props.set_ion(ion='na', int_con=10,   ext_con=140, rev_pot=50)
-        self._props.set_ion(ion='k',  int_con=54.4, ext_con=2.5, rev_pot=-77)
-        self._props.set_ion(ion='ca', int_con=0.00005, ext_con=2, rev_pot=132.5)
-        self._props.set_ion(ion='h', valence=1, int_con=1.0, ext_con=1.0, rev_pot=-34)
+        if props is None:
+            props = default_props()
+        self._trees = trees
+        self._props = props.properties
         self._catalogue = cat = arbor.default_catalogue()
-        for ingr in ingredients:
-            cat.extend(ingr.catalogue, "")
+        for tree in trees:
+            cat.extend(tree.catalogue, "")
         self._props.register(cat)
 
     def num_cells(self):
-        return len(self._ingredients)
+        return len(self._trees)
 
     def probes(self, gid):
-        ingr = self._ingredients[gid]
+        tree = self._trees[gid]
         return [
-            print(rm) or arbor.cable_probe_membrane_voltage(rm)
-            for rm in ingr.get_region_midpoints()
+            arbor.cable_probe_membrane_voltage(rm)
+            for rm in tree.get_region_midpoints()
         ]
 
     def num_sources(self, gid):
@@ -49,77 +153,10 @@ class Fumigation(arbor.recipe):
         return arbor.cell_kind.cable
 
     def cell_description(self, gid):
-        return self._ingredients[gid].cable_cell
+        return self._trees[gid].arbor_cell
 
     def global_properties(self, kind):
         return self._props
-
-
-@dataclass
-class Patient:
-    """
-    All information on a single cell model
-    """
-    name: str = field()
-    catalogue: tuple[arb_catalogue, str] = field()
-    morphology: arb_morphology = field()
-    labels: arb_label_dict = field()
-    decor: arb_decor = field()
-    cable_cell: arb_cable_cell = None
-    pwlin: arb_place_pwlin = None
-
-    def __post_init__(self):
-        self.decor.place("(root)", arbor.spike_detector(-10), "soma_spike_detector")
-        self.cable_cell = arbor.cable_cell(self.morphology, self.labels, self.decor)
-        self.pwlin = arbor.place_pwlin(self.morphology)
-
-    def get_region_midpoints(self):
-        return [f"(on-components 0.5 (region \"{r}\"))" for r in self.get_regions()]
-
-    def get_painted_regions(self):
-        return set(a[0][1:-1] for a, kw in self.decor.painted if len(a) > 1 and isinstance(a[1], arbor.mechanism))
-
-    def get_regions(self):
-        return set(self.labels)
-
-    def plot_morphology(self):
-        import plotly.graph_objs as go
-        import plotly.io as pio
-
-        pio.templates.default = "simple_white"
-        regions = self.get_regions()
-
-        fig = go.Figure()
-        dims = ("x", "y", "z")
-        origins = {k: float("+inf") for k in dims}
-        range = float("-inf")
-        for region, (x, y, z) in zip(
-            regions, map(self.get_region_pw_xyz, regions)
-        ):
-            fig.add_trace(go.Scatter3d(x=x, y=y, z=z, name=region, marker_size=1))
-            for k, d in zip(dims, (x, y, z)):
-                _min = min(v for v in d if v is not None)
-                _max = max(v for v in d if v is not None)
-                range = max(abs(_max - _min), range)
-                origins[k] = min(_min, origins[k])
-
-        for k, o in origins.items():
-            fig.layout.scene[f"{k}axis_range"] = [o, o + range]
-
-        fig.show()
-
-
-    def get_region_segments(self, region):
-        return self.pwlin.segments(self.cable_cell.cables(region))
-
-    def get_region_pw_xyz(self, region):
-        segments = self.get_region_segments(region)
-        x = [*itertools.chain(*((s.prox.x, s.dist.x, None) for s in segments))]
-        y = [*itertools.chain(*((s.prox.y, s.dist.y, None) for s in segments))]
-        z = [*itertools.chain(*((s.prox.z, s.dist.z, None) for s in segments))]
-        return x, y, z
-
-
 
 
 class DecorSpy(arbor.decor):
@@ -143,10 +180,10 @@ def apply(recipe, duration=1000):
     sim = arbor.simulation(recipe, domains, context)
     sim.record(arbor.spike_recording.all)
     handles = []
-    for gid, ingr in enumerate(recipe._ingredients):
+    for gid, tree in enumerate(recipe._trees):
         Vm_probes = {
             f"Vm_{r}": sim.sample((gid, j), arbor.regular_schedule(0.1))
-            for j, r in enumerate(ingr.get_regions())
+            for j, r in enumerate(tree.get_regions())
         }
         handles.append(Vm_probes)
 
@@ -166,3 +203,65 @@ def apply(recipe, duration=1000):
             fig.add_scatter(x=data[:, 0], y=data[:, 1], name=name + " " + str(meta))
         fig.show()
     return data[:, 0], data[:, 1]
+
+
+import arbor
+
+# (1) Create a morphology with a single (cylindrical) segment of length=diameter=6 μm
+tree = arbor.segment_tree()
+tree.append(arbor.mnpos, arbor.mpoint(-3, 0, 0, 3), arbor.mpoint(3, 0, 0, 3), tag=1)
+
+# (2) Define the soma and its midpoint
+labels = arbor.label_dict({'soma':   '(tag 1)',
+                           'midpoint': '(location 0 0.5)'})
+
+# (3) Create cell and set properties
+decor = arbor.decor()
+decor.set_property(Vm=-40)
+decor.paint('"soma"', 'hh')
+decor.place('"midpoint"', arbor.iclamp( 10, 2, 0.8), "iclamp")
+decor.place('"midpoint"', arbor.spike_detector(-10), "detector")
+cell = arbor.cable_cell(tree, labels, decor)
+
+tree = Tree("test", arbor.default_catalogue(), arbor.morphology(tree), labels, decor)
+
+# (4) Define a recipe for a single cell and set of probes upon it.
+# This constitutes the corresponding generic recipe version of
+# `single_cell_model.py`.
+
+class single_recipe(arbor.recipe, Treatment):
+    def __init__(self, cells):
+        # (4.1) The base C++ class constructor must be called first, to ensure that
+        # all memory in the C++ class is initialized correctly.
+        arbor.recipe.__init__(self)
+        self.the_cell = cells[0]
+        self._trees = cells
+        self.the_probes = [arbor.cable_probe_membrane_voltage('"midpoint"')]
+        self.the_probes = []
+        self.the_props = arbor.neuron_cable_properties()
+        self.the_cat = arbor.default_catalogue()
+        self.the_props.register(self.the_cat)
+
+    def num_cells(self):
+        # (4.2) Override the num_cells method
+        return 1
+
+    def cell_kind(self, gid):
+        # (4.3) Override the cell_kind method
+        return arbor.cell_kind.cable
+
+    def cell_description(self, gid):
+        # (4.4) Override the cell_description method
+        return self.the_cell.arbor_cell
+
+    def probes(self, gid):
+        # (4.5) Override the probes method
+        return self.the_probes
+
+    def global_properties(self, kind):
+        # (4.6) Override the global_properties method
+        return self.the_props
+
+# (5) Instantiate recipe with a voltage probe located on "midpoint".
+
+recipe = single_recipe([tree])
