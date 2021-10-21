@@ -79,6 +79,9 @@ class Treatment:
     t = 10
     dt = 0.025
 
+    def __repr__(self):
+        return f"<{type(self).__name__} trees=[{', '.join(t.name for t in self._trees)}]>"
+
 
 class Nursery(arbor.recipe, Treatment):
     """

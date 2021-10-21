@@ -105,7 +105,6 @@ class Tree:
                 sec.connect(cell.all[p])
         name = self.name
         # Hack to replace CV lists. Hardcode the `all` and `none` situations
-        print(name)
         if "decor=all" in name:
             for mech in mechs:
                 for sec in cell.all:

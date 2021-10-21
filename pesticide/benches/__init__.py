@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 import itertools as it
 import mpipool
 import typing
@@ -11,6 +11,46 @@ from ..trees import Tree
 from mpi4py.MPI import COMM_WORLD as comm
 
 @dataclass
+class Task:
+    start: float = field(default_factory=time)
+    end: float = field(default_factory=time)
+    checkpoints: dict[str, float] = field(default_factory=dict)
+    err: Exception = None
+
+    def finish(self):
+        self.end = time()
+
+    def error(self, err):
+        self.err = err
+        self.end = float("nan")
+
+    def checkpoint(self, name, start=False):
+        if name in self.checkpoints:
+            raise Exception(f"Duplicate checkpoint call {name}.")
+        self.checkpoints[name] = t = time()
+        if start:
+            self.start = t
+
+    def get(self, name):
+        # If the task errored out, return `nan` for all checkpoints it
+        # never hit.
+        if self.err:
+            return self.checkpoints.get(name, float("nan"))
+        else:
+            return self.checkpoints.get(name)
+
+@dataclass
+class Result:
+    treatment: InitVar[typing.Any]
+    job: Task
+    arb: Task
+    nrn: Task
+
+    def __post_init__(self, treatment):
+        self.name = repr(treatment)
+        self.ramk = comm.Get_rank()
+
+@dataclass
 class Bench:
     beds: list[typing.Any] = field()
     def run_benchmarks(self, name, reps=100):
@@ -19,10 +59,10 @@ class Bench:
             s = 0
             r = 0
             results = []
-            metas = []
+            times = []
             try:
                 with open(f"bench_{name}.pkl", "rb") as f:
-                    (s, r, results, metas) = pickle.load(f)
+                    (s, r, results, times) = pickle.load(f)
                     print("Starting from rep", s, "job", r)
             except FileNotFoundError:
                 print("Starting fresh")
@@ -31,21 +71,25 @@ class Bench:
                 job_main = self.get_jobs()
                 if i == s:
                     it.islice(job_main, r)
-                for k, (res_arb, res_nrn, meta) in enumerate(p.map(lambda j: j(), job_main)):
+                for k, result in enumerate(p.map(lambda j: j(), job_main)):
                     if i == s:
                         k += r
-                    res = (res_arb / res_nrn)
-                    print("Rep", i, "Job", k, end="\r")
+                    res_arb = result.arb.end - result.arb.get("sim-init")
+                    res_nrn = result.nrn.end - result.nrn.get("sim-init")
+                    res = res_nrn / res_arb
+                    print("Rep", i, "Job", k, "Arbor", res_nrn / res_arb, "times faster.", end="\r")
                     try:
-                        results[k] += res / reps
+                        times[k] += res / reps
+                        results[k].append(result)
                     except:
-                        results.append(res / reps)
-                        metas.append(meta)
-                    with open(f"bench_{name}.pkl", "wb") as f:
-                        pickle.dump((i, k, results, metas), f)
-            for res, meta in zip(results, metas):
-                with open(str(hash(meta)) + ".txt", "w") as f:
-                    f.write(f"{res}\n{meta}")
+                        times.append(res / reps)
+                        results.append([result])
+                    if not k % 100:
+                        with open(f"bench_{name}.pkl", "wb") as f:
+                            pickle.dump((i, k, results, times), f)
+            for res, avg_time in zip(results, times):
+                with open(str(hash(res[0].name)) + ".txt", "w") as f:
+                    f.write(f"{res[0].name}\n{avg_time}")
 
     def get_jobs(self):
         job_iterator = it.chain.from_iterable(bed.jobs() for bed in self.beds)
@@ -203,32 +247,49 @@ class Job:
         self._trees_f = trees_f
 
     def __call__(self):
-        self.trees = self._trees_f()
-        self.treatment = self._treatment_f(self.trees)
-        t_arb = self.time_arb()
-        t_nrn = self.time_nrn()
+        job = Task()
+        self.trees = trees = self._trees_f()
+        job.checkpoint("trees-created")
+        self.treatment = self._treatment_f(trees)
+        job.checkpoint("treatment-created")
+        arb_task = self.time_arb()
+        job.checkpoint("arbor")
+        nrn_task = self.time_nrn()
+        result = Result(self.treatment, job, arb_task, nrn_task)
+        job.checkpoint("neuron")
+        job.finish()
         del self.trees, self.treatment
-        return t_arb, t_nrn, [t.name for t in self._trees_f()]
+        return result
 
     def time_nrn(self):
-        from neuron import h
-        # Construct the object
-        cells = [tree.neuron_cell() for tree in self.treatment._trees]
-        h.dt = self.treatment.dt
-        t = time()
-        h.finitialize()
-        while h.t < self.treatment.t:
-            h.fadvance()
-        return time() - t
+        task = Task()
+        try:
+            from neuron import h
+            # Construct the object
+            cells = [tree.neuron_cell() for tree in self.treatment._trees]
+            h.dt = self.treatment.dt
+            h.finitialize()
+            task.checkpoint("sim-init")
+            while h.t < self.treatment.t:
+                h.fadvance()
+            task.finish()
+        except Exception as e:
+            task.error(e)
+        return task
 
     def time_arb(self):
-        import arbor
-        context = arbor.context()
-        dd = arbor.partition_load_balance(self.treatment, context)
-        sim = arbor.simulation(self.treatment, dd, context)
-        t = time()
-        sim.run(self.treatment.t, self.treatment.dt)
-        return time() - t
+        task = Task()
+        try:
+            import arbor
+            context = arbor.context()
+            dd = arbor.partition_load_balance(self.treatment, context)
+            sim = arbor.simulation(self.treatment, dd, context)
+            task.checkpoint("sim-init")
+            sim.run(self.treatment.t, self.treatment.dt)
+            task.finish()
+        except Exception as e:
+            task.error(e)
+        return task
 
 def seed(cat_name: str) -> TreeListGen:
     return TreeListGen(MorphoGen(), NoneAndAllLabelGen(), AllDecorGen(), MechGen(cat_name))
