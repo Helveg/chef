@@ -41,14 +41,16 @@ class Task:
 
 @dataclass
 class Result:
+    name: str = field(init=False)
+    rank: int = field(init=False)
     treatment: InitVar[typing.Any]
     job: Task
     arb: Task
     nrn: Task
 
     def __post_init__(self, treatment):
-        self.name = repr(treatment)
-        self.ramk = comm.Get_rank()
+        self.name = treatment.get_description()
+        self.rank = comm.Get_rank()
 
 @dataclass
 class Bench:
@@ -191,8 +193,6 @@ class MechGen:
         combs = it.chain.from_iterable(
             it.combinations(mechs, r) for r in (0, 1, 2, 3, 4, len(mechs))
         )
-        # Bind `comb` as a __default__ to the lambda for each iter.
-        # Otherwise all lambdas use the last iteration of `comb`.
         yield from (lambda comb=comb: self.mechanisms(comb) for i, comb in enumerate(combs))
 
 @dataclass
