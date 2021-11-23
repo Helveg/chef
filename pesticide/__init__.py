@@ -67,7 +67,6 @@ def default_props():
         na_int_con=10.0, na_ext_con=140.0, na_rev_pot=50.0,
         k_int_con=54.4, k_ext_con=2.5, k_rev_pot=-77.0,
         ca_int_con=0.00005, ca_ext_con=2.0, ca_rev_pot=132.5,
-        cal_int_con=0.00005, cal_ext_con=2.0, cal_rev_pot=132.5, cal_valence=2,
         h_valence=1.0, h_int_con=1.0, h_ext_con=1.0, h_rev_pot=-34.0,
     )
 
@@ -81,6 +80,19 @@ class Treatment:
 
     def get_description(self):
         return '||'.join(t.name for t in self._trees)
+
+    def setup_probes(self, sim):
+        self.handles = [
+            [
+                sim.sample((i, p), arbor.regular_schedule(0.025))
+                for p in range(len(self.probes(i)))
+            ]
+            for i in range(self.num_cells())
+        ]
+
+    def get_probe_samples(self, sim):
+        return [[[(data, str(meta)) for data, meta in sim.samples(h)] for h in cell_handles] for cell_handles in self.handles]
+
 
 class Nursery(arbor.recipe, Treatment):
     """
@@ -104,10 +116,9 @@ class Nursery(arbor.recipe, Treatment):
         return 1
 
     def probes(self, gid):
-        return []
-        [
+        return [
             arbor.cable_probe_membrane_voltage(rm)
-            for rm in tree.get_region_midpoints()
+            for rm in self._trees[gid].get_region_midpoints()
         ]
 
     def num_sources(self, gid):
@@ -220,7 +231,7 @@ labels = arbor.label_dict({'soma':   '(tag 1)',
 # (3) Create cell and set properties
 decor = arbor.decor()
 decor.set_property(Vm=-40)
-decor.paint('"soma"', 'hh')
+decor.paint('"soma"', arbor.density('hh'))
 decor.place('"midpoint"', arbor.iclamp( 10, 2, 0.8), "iclamp")
 decor.place('"midpoint"', arbor.spike_detector(-10), "detector")
 cell = arbor.cable_cell(tree, labels, decor)

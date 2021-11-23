@@ -3,10 +3,17 @@ import functools
 import math
 from dataclasses import dataclass, field
 import itertools as it
+import numpy as np
 
 class NrnCell:
     def __init__(self):
         self.all = []
+
+    def init_vm(self):
+        self.recorders = [make_recorder(s) for s in self.all]
+
+    def vm(self):
+        return [np.array(list(s)) for s in self.recorders]
 
 def _dims(segments):
     d = lambda s, d: (getattr(s.prox, d) - getattr(s.dist, d)) ** 2
@@ -20,6 +27,12 @@ def make_section(segments):
     sec = neuron.h.Section()
     sec.L, sec.diam = _dims(segments)
     return sec
+
+def make_recorder(section):
+    import neuron
+    v = neuron.h.Vector()
+    v.record(section(0.5)._ref_v)
+    return v
 
 
 @dataclass
@@ -107,6 +120,8 @@ class Tree:
         # Hack to replace CV lists. Hardcode the `all` and `none` situations
         if "decor=all" in name:
             for mech in mechs:
+                # mech is actually a `density` so pick up its mech
+                mech = mech.mech
                 for sec in cell.all:
                     gname = mech.name
                     var = None
@@ -123,4 +138,5 @@ class Tree:
                             tried.append((gname, var))
                     else:
                         raise Exception(f"No glia asset found for {mech.name} {tried}")
+        cell.init_vm()
         return cell

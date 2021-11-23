@@ -9,6 +9,7 @@ import glia
 import pickle
 from ..trees import Tree
 from mpi4py.MPI import COMM_WORLD as comm
+import numpy as np
 
 @dataclass
 class Task:
@@ -16,6 +17,7 @@ class Task:
     end: float = field(default_factory=time)
     checkpoints: dict[str, float] = field(default_factory=dict)
     err: Exception = None
+    data: np.ndarray = None
 
     def finish(self):
         self.end = time()
@@ -39,6 +41,9 @@ class Task:
         else:
             return self.checkpoints.get(name)
 
+    def set_data(self, data):
+        self.data = data
+
 @dataclass
 class Result:
     name: str = field(init=False)
@@ -55,19 +60,20 @@ class Result:
 @dataclass
 class Bench:
     beds: list[typing.Any] = field()
-    def run_benchmarks(self, name, reps=100):
+    def run_benchmarks(self, name, reps=100, no_pkl=False):
+        results = []
+        times = []
         with mpipool.MPIExecutor() as p:
             p.workers_exit()
             s = 0
             r = 0
-            results = []
-            times = []
-            try:
-                with open(f"bench_{name}.pkl", "rb") as f:
-                    (s, r, results, times) = pickle.load(f)
-                    print("Starting from rep", s, "job", r)
-            except FileNotFoundError:
-                print("Starting fresh")
+            if not no_pkl:
+                try:
+                    with open(f"bench_{name}.pkl", "rb") as f:
+                        (s, r, results, times) = pickle.load(f)
+                        print("Starting from rep", s, "job", r)
+                except FileNotFoundError:
+                    print("Starting fresh")
             for i in range(s, reps):
                 print("Getting jobs")
                 job_main = self.get_jobs()
@@ -86,12 +92,15 @@ class Bench:
                     except:
                         times.append(res / reps)
                         results.append([result])
-                    if not k % 100:
+                    if not k % 100 and not no_pkl:
                         with open(f"bench_{name}.pkl", "wb") as f:
                             pickle.dump((i, k, results, times), f)
-            for res, avg_time in zip(results, times):
-                with open(str(hash(res[0].name)) + ".txt", "w") as f:
-                    f.write(f"{res[0].name}\n{avg_time}")
+            if not no_pkl:
+                for res, avg_time in zip(results, times):
+                    with open(str(hash(res[0].name)) + ".txt", "w") as f:
+                        f.write(f"{res[0].name}\n{avg_time}")
+        # results, times = comm.bcast((results, times), root=0)
+        return results, times
 
     def get_jobs(self):
         job_iterator = it.chain.from_iterable(bed.jobs() for bed in self.beds)
@@ -181,17 +190,19 @@ class AllDecorGen(DecorGen):
 @dataclass
 class MechGen:
     catalogue_name: str
+    combinations: tuple[int] = (0, 1, 2, 3, 4, -1)
 
     def catalogue(self):
         return glia.catalogue(self.catalogue_name)
 
     def mechanisms(self, combination):
-        return " ".join(combination), [arbor.mechanism(mech) for mech in combination]
+        return " ".join(combination), [arbor.density(mech) for mech in combination]
 
     def generate(self):
         mechs = list(self.catalogue())
+        cls_combos = (c if c != -1 else len(mechs) for c in self.combinations)
         combs = it.chain.from_iterable(
-            it.combinations(mechs, r) for r in (0, 1, 2, 3, 4, len(mechs))
+            it.combinations(mechs, r) for r in cls_combos
         )
         yield from (lambda comb=comb: self.mechanisms(comb) for i, comb in enumerate(combs))
 
@@ -262,6 +273,7 @@ class Job:
         return result
 
     def time_nrn(self):
+        import glia
         task = Task()
         try:
             from neuron import h
@@ -273,7 +285,9 @@ class Job:
             while h.t < self.treatment.t:
                 h.fadvance()
             task.finish()
+            task.set_data(np.array([*(cell.vm() for cell in cells)]))
         except Exception as e:
+            glia._manager.list_assets()
             task.error(e)
         return task
 
@@ -284,12 +298,18 @@ class Job:
             context = arbor.context()
             dd = arbor.partition_load_balance(self.treatment, context)
             sim = arbor.simulation(self.treatment, dd, context)
+            self.treatment.setup_probes(sim)
             task.checkpoint("sim-init")
             sim.run(self.treatment.t, self.treatment.dt)
             task.finish()
+            task.set_data(self.treatment.get_probe_samples(sim))
         except Exception as e:
             task.error(e)
         return task
 
-def seed(cat_name: str) -> TreeListGen:
-    return TreeListGen(MorphoGen(), NoneAndAllLabelGen(), AllDecorGen(), MechGen(cat_name))
+def seed(cat_name: str, combos=None) -> TreeListGen:
+    if combos is None:
+        mech_gen = MechGen(cat_name)
+    else:
+        mech_gen = MechGen(cat_name, combos)
+    return TreeListGen(MorphoGen(), NoneAndAllLabelGen(), AllDecorGen(), mech_gen)
